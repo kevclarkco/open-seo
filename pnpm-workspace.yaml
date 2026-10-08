@@ -94,3 +94,14 @@ overrides:
   mysql2: "^3.23.1"
   "nanoid@3": "^3.3.18"
   "toml@4": "^4.2.0"
+
+# Local: dependencies allowed to run install scripts (pnpm approve-builds).
+onlyBuiltDependencies:
+  - "@mongodb-js/zstd"
+  - core-js
+  - core-js-pure
+  - esbuild
+  - msgpackr-extract
+  - node-liblzma
+  - sharp
+  - workerd
