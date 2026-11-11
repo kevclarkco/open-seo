@@ -98,6 +98,20 @@ it("profiles only the summary and history for the overview and reuses cache on r
   expect(second).toEqual(first);
 });
 
+it("shows a subdomain's summary without trends when its history fails", async () => {
+  mockTarget({ apiTarget: "health.oregonstate.edu" });
+  backlinksSummaryMock.mockResolvedValue({ backlinks: 1200 });
+  backlinksHistoryMock.mockRejectedValue(new Error("history unavailable"));
+
+  const { overview } = await service.profileOverview(
+    { target: "health.oregonstate.edu" },
+    billingCustomer,
+  );
+
+  expect(overview.summary.backlinks).toBe(1200);
+  expect(overview.trends).toEqual([]);
+});
+
 it("profiles backlink rows per page with offset and total count", async () => {
   mockTarget();
   backlinksRowsMock.mockResolvedValue({
@@ -240,4 +254,18 @@ it("builds subfolder overview totals from two filtered backlink counts", async (
       hideSpam: false,
     }),
   );
+});
+
+it("shows the provider's last_seen timestamp in backlink results", async () => {
+  mockTarget();
+  backlinksRowsMock.mockResolvedValue({
+    items: [{ last_seen: "2026-10-06 10:00:00 +00:00" }],
+    totalCount: 1,
+  });
+  const result = await service.profileBacklinksPage(
+    { ...pageInputDefaults, target: "example.com", sortField: "rank" },
+    billingCustomer,
+    { hideSpam: false },
+  );
+  expect(result.rows[0]?.lastSeen).toBe("2026-10-06 10:00:00 +00:00");
 });

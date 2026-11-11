@@ -1,3 +1,4 @@
+import { MetricsTable } from "@/client/components/MetricsTable";
 import { useMemo, type ReactNode } from "react";
 import { ShieldAlert } from "lucide-react";
 import {
@@ -5,7 +6,10 @@ import {
   exportPages,
   exportPerformance,
 } from "@/client/features/audit/results/export";
-import type { AuditResultsData } from "@/client/features/audit/results/types";
+import type {
+  AuditLighthouseRow,
+  AuditResultsData,
+} from "@/client/features/audit/results/types";
 import { isLighthouseFailure } from "@/client/features/audit/results/AuditResultsTableFilterLogic";
 import {
   IssuesView,
@@ -46,47 +50,41 @@ export function ResultsView({
   /** The page already says bot protection blocked the whole site. */
   siteBlocked: boolean;
 }) {
-  const { audit, pages, lighthouse, issues } = data;
-  const crawlStopped = issues.some(
-    (issue) => issue.issueType === "crawl-rate-limited",
+  const { audit, lighthouse, issueGroups } = data;
+  const auditRef = { projectId, auditId: audit.id };
+  const crawlStopped = issueGroups.some(
+    (group) => group.issueType === "crawl-rate-limited",
   );
   const hasPerformanceTab = lighthouse.length > 0;
   const activeTab =
     tab === "performance" && !hasPerformanceTab ? "issues" : tab;
-  const stats = useResultStats(pages, lighthouse);
-  const blockedCount = useMemo(
-    () => pages.filter((page) => page.fetchClass === "blocked").length,
-    [pages],
-  );
-  const rateLimitedCount = useMemo(
-    () => pages.filter((page) => page.fetchClass === "rate_limited").length,
-    [pages],
-  );
+  const lighthouseSummary = useLighthouseSummary(lighthouse);
+  const blockedCount = data.fetchClassCounts.blocked;
+  const rateLimitedCount = data.fetchClassCounts.rate_limited;
 
-  // Shopify's own crawler-access signature is a real fix for a throttled or
-  // refused crawl, so it replaces the generic advice for those stores.
+  // Shopify stores get their own notice instead of the generic advice.
   const shopifyLimited =
     audit.config.sitePlatform === "shopify" &&
     (blockedCount > 0 || rateLimitedCount > 0 || crawlStopped);
 
   const tabs = (
     <ResultsHeader
-      issueCount={issues.length}
-      pageCount={pages.length}
+      issueCount={data.issueCount}
+      pageCount={data.pageCount}
       lighthouseCount={lighthouse.length}
       hasPerformanceTab={hasPerformanceTab}
       activeTab={activeTab}
       onTabChange={onTabChange}
       onExport={(format) => {
         if (activeTab === "performance") {
-          exportPerformance(lighthouse, pages, format);
+          exportPerformance(lighthouse, format);
           return;
         }
         if (activeTab === "issues") {
-          exportIssues(issues, format);
+          exportIssues(auditRef, format);
           return;
         }
-        exportPages(pages, format);
+        exportPages(auditRef, format);
       }}
     />
   );
@@ -94,7 +92,11 @@ export function ResultsView({
   return (
     <>
       {shopifyLimited && (
-        <ShopifyCrawlWarning projectId={projectId} audit={audit} />
+        <ShopifyCrawlWarning
+          projectId={projectId}
+          audit={audit}
+          throttled={rateLimitedCount > 0 || crawlStopped}
+        />
       )}
 
       {!shopifyLimited && !siteBlocked && blockedCount > 0 && (
@@ -123,10 +125,19 @@ export function ResultsView({
           </AlertTitle>
           <AlertDescription>
             {crawlStopped
-              ? "The requested cooldown exceeded the audit time limit, so some URLs were left unvisited. This report is incomplete. "
+              ? "The site kept refusing pages, so some URLs were left unvisited. This report is incomplete. "
               : "Pages that returned 429 Too Many Requests could not be audited. "}
             Re-run the audit after the rate limit resets, or ask the site owner
-            to allow the "OpenSEO-Audit" crawler.
+            to allow the{" "}
+            <a
+              className="underline underline-offset-4"
+              href="https://openseo.so/docs/crawler"
+              target="_blank"
+              rel="noreferrer"
+            >
+              OpenSEO-Audit crawler
+            </a>
+            .
           </AlertDescription>
         </Alert>
       )}
@@ -135,18 +146,21 @@ export function ResultsView({
 
       <StatsStrip
         pagesCrawled={audit.pagesCrawled}
-        issues={issues}
+        issueCount={data.issueCount}
+        issueGroups={issueGroups}
         totalLighthouse={lighthouse.length}
-        averageResponseMs={stats.averageResponseMs}
-        lighthouseSummary={stats.lighthouseSummary}
+        averageResponseMs={data.averageResponseMs}
+        lighthouseSummary={lighthouseSummary}
       />
 
-      {activeTab === "issues" && <IssuesView issues={issues} tabs={tabs} />}
+      {activeTab === "issues" && (
+        <IssuesView auditRef={auditRef} issueGroups={issueGroups} tabs={tabs} />
+      )}
       {activeTab === "pages" && (
         <PagesTable
-          pages={pages}
-          startUrl={audit.startUrl}
-          issues={issues}
+          auditRef={auditRef}
+          canonicalHost={data.canonicalHost}
+          totalCount={data.pageCount}
           tabs={tabs}
         />
       )}
@@ -155,7 +169,6 @@ export function ResultsView({
           auditId={audit.id}
           projectId={projectId}
           lighthouse={lighthouse}
-          pages={pages}
           tabs={tabs}
         />
       )}
@@ -163,36 +176,18 @@ export function ResultsView({
   );
 }
 
-function useResultStats(
-  pages: AuditResultsData["pages"],
-  lighthouse: AuditResultsData["lighthouse"],
-) {
-  const averageResponseMs = useMemo(() => {
-    if (pages.length === 0) return 0;
-    const total = pages.reduce(
-      (sum: number, page: AuditResultsData["pages"][number]) =>
-        sum + (page.responseTimeMs ?? 0),
-      0,
-    );
-    return Math.round(total / pages.length);
-  }, [pages]);
-
-  const lighthouseSummary = useMemo(() => {
-    const failed = lighthouse.filter(
-      (row: AuditResultsData["lighthouse"][number]) => isLighthouseFailure(row),
-    ).length;
-    const successful = lighthouse.filter(
-      (row: AuditResultsData["lighthouse"][number]) =>
-        !isLighthouseFailure(row),
-    );
+function useLighthouseSummary(lighthouse: AuditLighthouseRow[]) {
+  return useMemo(() => {
+    const failed = lighthouse.filter((row) => isLighthouseFailure(row)).length;
+    const successful = lighthouse.filter((row) => !isLighthouseFailure(row));
     const averageScore = (
       key: "performanceScore" | "seoScore" | "accessibilityScore",
     ) => {
       const values = successful
-        .map((row: AuditResultsData["lighthouse"][number]) => row[key])
-        .filter((value: number | null): value is number => value != null);
+        .map((row) => row[key])
+        .filter((value): value is number => value != null);
       if (values.length === 0) return null;
-      const total = values.reduce((sum: number, value) => sum + value, 0);
+      const total = values.reduce((sum, value) => sum + value, 0);
       return Math.round(total / values.length);
     };
 
@@ -203,8 +198,6 @@ function useResultStats(
       avgAccessibility: averageScore("accessibilityScore"),
     };
   }, [lighthouse]);
-
-  return { averageResponseMs, lighthouseSummary };
 }
 
 function ResultsHeader({
@@ -266,13 +259,15 @@ interface StatItem {
 
 function StatsStrip({
   pagesCrawled,
-  issues,
+  issueCount,
+  issueGroups,
   totalLighthouse,
   averageResponseMs,
   lighthouseSummary,
 }: {
   pagesCrawled: number;
-  issues: AuditResultsData["issues"];
+  issueCount: number;
+  issueGroups: AuditResultsData["issueGroups"];
   totalLighthouse: number;
   averageResponseMs: number;
   lighthouseSummary: {
@@ -284,19 +279,19 @@ function StatsStrip({
 }) {
   const severityCounts = useMemo(() => {
     const counts = { critical: 0, warning: 0, info: 0 };
-    for (const issue of issues) {
-      counts[resolveIssueSeverity(issue)] += 1;
+    for (const group of issueGroups) {
+      counts[resolveIssueSeverity(group)] += group.count;
     }
     return counts;
-  }, [issues]);
+  }, [issueGroups]);
 
   const items: StatItem[] = [
     { label: "Pages crawled", value: String(pagesCrawled) },
     {
       label: "Issues found",
-      value: String(issues.length),
-      valueClass: issues.length === 0 ? "text-success" : "",
-      sub: issues.length > 0 && (
+      value: String(issueCount),
+      valueClass: issueCount === 0 ? "text-success" : "",
+      sub: issueCount > 0 && (
         <span className="flex flex-wrap items-center gap-1">
           {(["critical", "warning", "info"] as const).map((severity) =>
             severityCounts[severity] > 0 ? (
@@ -305,6 +300,11 @@ function StatsStrip({
                 severity={severity}
                 title={severity}
               >
+                {severity === "critical"
+                  ? "Critical"
+                  : severity === "warning"
+                    ? "Warning"
+                    : "Info"}{" "}
                 {severityCounts[severity]}
               </SeverityBadge>
             ) : null,
@@ -312,14 +312,14 @@ function StatsStrip({
         </span>
       ),
     },
-    { label: "Avg response", value: `${averageResponseMs}ms` },
+    { label: "Average response time", value: `${averageResponseMs}ms` },
   ];
 
   if (totalLighthouse > 0) {
     items.push(
       { label: "Lighthouse tests", value: String(totalLighthouse) },
       {
-        label: "Avg Lighthouse perf",
+        label: "Lighthouse performance",
         value:
           lighthouseSummary.avgPerformance == null
             ? "-"
@@ -327,7 +327,7 @@ function StatsStrip({
         valueClass: scoreClass(lighthouseSummary.avgPerformance),
       },
       {
-        label: "Avg Lighthouse SEO",
+        label: "Lighthouse SEO",
         value:
           lighthouseSummary.avgSeo == null
             ? "-"
@@ -335,7 +335,7 @@ function StatsStrip({
         valueClass: scoreClass(lighthouseSummary.avgSeo),
       },
       {
-        label: "Avg Lighthouse a11y",
+        label: "Lighthouse accessibility",
         value:
           lighthouseSummary.avgAccessibility == null
             ? "-"
@@ -351,30 +351,19 @@ function StatsStrip({
     );
   }
 
-  const columnsClass =
-    items.length === 3
-      ? "grid-cols-1 sm:grid-cols-3"
-      : "grid-cols-2 md:grid-cols-4";
-
   return (
-    <div
-      className={`grid ${columnsClass} gap-px rounded-lg border border-border bg-border overflow-hidden`}
-    >
-      {items.map((item) => (
-        <div key={item.label} className="bg-card px-4 py-3">
-          <p className="text-[11px] uppercase tracking-wider text-muted-foreground">
-            {item.label}
-          </p>
-          <p
-            className={`text-xl font-semibold mt-0.5 tabular-nums ${item.valueClass ?? ""}`}
-          >
-            {item.value}
-          </p>
-          {item.sub && (
-            <div className="text-xs text-muted-foreground mt-1">{item.sub}</div>
-          )}
-        </div>
-      ))}
+    <div className="w-full max-w-xl rounded-lg border border-border bg-card p-3">
+      <MetricsTable
+        rows={items.map((item) => ({
+          label: (
+            <div className="flex flex-wrap items-center gap-2">
+              {item.label}
+              {item.sub || null}
+            </div>
+          ),
+          value: <span className={item.valueClass}>{item.value}</span>,
+        }))}
+      />
     </div>
   );
 }

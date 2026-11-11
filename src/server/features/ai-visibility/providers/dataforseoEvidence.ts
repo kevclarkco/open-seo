@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { safeHttpUrl } from "@/shared/safe-url";
 import type { AiEngine } from "@/shared/ai-visibility";
+import type { LlmResponseResult } from "@/server/lib/dataforseoLlmSchemas";
 
 const optionalMarkdown = z.string().max(1_000_000).nullish();
 const sourceList = z.array(z.unknown()).max(2_000).nullish();
@@ -23,7 +24,7 @@ const aiOverviewSchema = z.object({
 });
 const sourceSchema = z.object({
   url: z.string().max(16_384),
-  title: z.string().max(10_000).nullish(),
+  title: z.string().max(10_000).transform(withoutNul).nullish(),
 });
 
 export interface AiCitation {
@@ -76,6 +77,7 @@ export function parseDataforseoAnswer(
     markdown = result.markdown ?? null;
     sources = result.sources ?? [];
   }
+  if (markdown) markdown = withoutNul(markdown);
   const answerText = markdown ? markdownToText(markdown) : "";
   return {
     answerMarkdown: answerText.trim() ? markdown : null,
@@ -83,6 +85,38 @@ export function parseDataforseoAnswer(
     citations: citationsFrom(sources),
     collectedAt: dateOrNull(result.datetime),
   };
+}
+
+/**
+ * Normalize one live LLM Responses answer. The message sections hold the
+ * answer, and their annotations hold the cited pages.
+ */
+export function parseLlmResponseAnswer(
+  result: LlmResponseResult,
+): ParsedAiAnswer {
+  const sections = (result.items ?? [])
+    .filter((item) => item.type === "message")
+    .flatMap((item) => item.sections ?? []);
+  const markdown = withoutNul(
+    sections
+      .map((section) => section.text ?? "")
+      .filter(Boolean)
+      .join("\n\n"),
+  );
+  const answerText = markdownToText(markdown);
+  return {
+    answerMarkdown: answerText.trim() ? markdown : null,
+    answerText: answerText.trim() ? answerText : "",
+    citations: citationsFrom(
+      sections.flatMap((section) => section.annotations ?? []),
+    ),
+    collectedAt: null,
+  };
+}
+
+/** Postgres text columns reject NUL, which scraped answers and titles can carry. */
+function withoutNul(text: string): string {
+  return text.replaceAll("\0", "");
 }
 
 function dateOrNull(value: string | null | undefined): string | null {

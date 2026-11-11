@@ -1,17 +1,18 @@
 import { waitUntil } from "cloudflare:workers";
-import {
-  checkUsageCreditsDepleted,
-  type BillingCustomerContext,
-} from "@/server/billing/subscription";
-import { isHostedServerAuthMode } from "@/server/lib/runtime-env";
+import { type BillingCustomerContext } from "@/server/billing/subscription";
 import type { ContextAuthor } from "@/types/schemas/projectContext";
 import { ProjectContextRepository } from "@/server/features/project-context/repositories/ProjectContextRepository";
 import { ProjectRepository } from "@/server/features/projects/repositories/ProjectRepository";
 import { saveWebsiteSetup } from "@/server/features/projects/repositories/ProjectWebsiteRepository";
 import { researchWebsite } from "@/server/features/projects/services/websiteResearch";
+import { withResearchAdmission } from "@/server/billing/researchSpend";
 import { normalizeBacklinksTarget } from "@/server/lib/dataforseoBacklinksTarget";
 import { AppError } from "@/server/lib/errors";
-import { prepareWebsiteTracking } from "@/server/features/ai-visibility/services/websiteTrackingSetup";
+import { isDefaultProjectName } from "@/shared/ai-visibility";
+import {
+  prepareWebsiteTracking,
+  startWebsiteTrackingRun,
+} from "@/server/features/ai-visibility/services/websiteTrackingSetup";
 import {
   saveProjectWebsiteSetupSchema,
   type SaveProjectWebsiteSetup,
@@ -34,17 +35,11 @@ async function research(
   customer: BillingCustomerContext,
 ) {
   const project = await requireProject(customer, projectId);
-  // Any positive credit balance admits the whole research task. Its model
-  // calls and searches finish before billing, even if the balance goes negative.
-  if (
-    (await isHostedServerAuthMode()) &&
-    (await checkUsageCreditsDepleted(customer)).depleted
-  )
-    throw new AppError(
-      "INSUFFICIENT_CREDITS",
-      "You need usage credits to research your website.",
-    );
-  const work = researchWebsite(website, project, { ...customer, projectId });
+  const work = withResearchAdmission(
+    customer,
+    "You need usage credits to research your website.",
+    () => researchWebsite(website, project, { ...customer, projectId }),
+  );
   // Keep provider work and final settlement alive within the request's
   // background grace period if the client disconnects, as the shared meter does.
   waitUntil(work.catch(() => undefined));
@@ -54,10 +49,12 @@ async function save(
   input: SaveProjectWebsiteSetup,
   customer: BillingCustomerContext,
   author: ContextAuthor,
+  // In-app onboarding runs seeded tracking once. MCP setup never spends;
+  // agents get approval before a run.
+  { runSeededTracking = false } = {},
 ) {
   const accepted = saveProjectWebsiteSetupSchema.parse(input);
   const project = await requireProject(customer, accepted.projectId);
-  accepted.name = project.name;
   accepted.domain =
     project.domain ??
     normalizeBacklinksTarget(accepted.domain, {
@@ -84,7 +81,20 @@ async function save(
     ...new Map(accepted.competitors.map((row) => [row.domain, row])).values(),
   ];
   const tracking = await prepareWebsiteTracking(accepted, project);
-  await saveWebsiteSetup(customer.organizationId, accepted, author, tracking);
-  return requireProject(customer, accepted.projectId);
+  await saveWebsiteSetup(
+    customer.organizationId,
+    accepted,
+    // "Default" is never tracked, so an agent passing the project name back
+    // must not save it as the brand.
+    isDefaultProjectName(accepted.name) ? null : accepted.name,
+    author,
+    tracking,
+  );
+  if (tracking && runSeededTracking)
+    await startWebsiteTrackingRun(accepted.projectId, customer);
+  return {
+    project: await requireProject(customer, accepted.projectId),
+    seededTracking: tracking !== null,
+  };
 }
 export const ProjectWebsiteService = { research, save };

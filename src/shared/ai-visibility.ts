@@ -1,19 +1,43 @@
 import {
+  getIsoCountryCode,
   LOCATION_OPTIONS,
   SERP_LANGUAGE_OPTIONS,
 } from "@/shared/keyword-locations";
+import { supportsWebSearchCountry } from "@/shared/prompt-search-countries";
 
-export type AiEngine = "chatgpt" | "gemini" | "google_ai_overview";
+export type AiEngine =
+  | "chatgpt"
+  | "gemini"
+  | "google_ai_overview"
+  | "claude"
+  | "perplexity";
 export const AI_ENGINE_LABELS: Record<AiEngine, string> = {
   chatgpt: "ChatGPT",
   gemini: "Gemini",
   google_ai_overview: "Google AI Overviews",
+  claude: "Claude",
+  perplexity: "Perplexity",
 };
+/**
+ * Engines DataForSEO has no LLM Scraper for. Their answers come from the live
+ * LLM Responses API, at live API pricing. Each name is also its API model slug.
+ */
+export type AiModelApiEngine = Extract<AiEngine, "claude" | "perplexity">;
+export function aiEngineUsesModelApi(
+  engine: AiEngine,
+): engine is AiModelApiEngine {
+  return engine === "claude" || engine === "perplexity";
+}
 /**
  * Raw DataForSEO USD for one answer, standard queue. AI Overviews is one
  * organic SERP page ($0.0006) plus the async overview load ($0.0006).
  */
 export const AI_RECORD_COST_USD = 0.0012;
+/**
+ * Raw DataForSEO USD for one live answer, used by manual runs. AI Overviews is
+ * one live organic SERP page ($0.002) plus the async overview load ($0.002).
+ */
+export const AI_LIVE_RECORD_COST_USD = 0.004;
 export type AiScheduleInterval = "daily" | "weekly" | "monthly";
 export type AiObservationStatus = "pending" | "completed" | "failed";
 /** Prompts without a chosen topic are grouped here. */
@@ -25,11 +49,34 @@ export interface AiPrompt {
   paused: boolean;
   archived: boolean;
   branded: boolean;
+  /** Whether any run has collected answer text for this prompt. */
+  hasResults: boolean;
 }
 export interface AiBrand {
   name: string;
   domain: string;
   own: boolean;
+}
+/** The auto-created project's name. It is never matched as the project's brand. */
+export function isDefaultProjectName(name: string) {
+  return name.trim().toLowerCase() === "default";
+}
+/** The name AI visibility looks for in answers. */
+export function ownBrandName(project: {
+  name: string;
+  brandName: string | null;
+}) {
+  return project.brandName || project.name;
+}
+/**
+ * What a brand goes by, on screen and when matching answers. "Default" names the
+ * auto-created project, not a business, so that project goes by its website. A
+ * competitor can really be called that, so it keeps its name.
+ */
+export function aiBrandLabel(brand: Pick<AiBrand, "name" | "domain" | "own">) {
+  return brand.own && isDefaultProjectName(brand.name)
+    ? brand.domain
+    : brand.name;
 }
 export interface AiTracker {
   id: string;
@@ -49,6 +96,8 @@ export interface AiCapability {
   unsupportedLocationCodes: number[];
   maxPromptLength: number;
   note: string;
+  /** Every run asks the model's API, at live API pricing. */
+  modelApi: boolean;
 }
 export interface AiRun {
   id: string;
@@ -100,6 +149,9 @@ export interface AiCostEstimate {
   providerCostUsd: number;
   costUsd: number;
   costCredits: number;
+  /** A one-off Run now check collects live answers, at the live price. */
+  runNowCostUsd: number;
+  runNowCostCredits: number;
   scheduleInterval: AiScheduleInterval;
   checksPerMonth: number;
   monthlyCostUsd: number;
@@ -190,6 +242,8 @@ export interface AiSourceRow {
   ownership: "own" | "competitor" | "other";
   answerCount: number;
   promptCount: number;
+  /** The tracked prompts whose answers cited this source. */
+  promptIds: string[];
   engines: { engine: AiEngine; answerCount: number }[];
   observationIds: string[];
   truncated: boolean;
@@ -266,10 +320,23 @@ export interface AiTrend {
  * engine. Keep in sync with each engine's DataForSEO locations endpoint.
  */
 export const AI_UNSUPPORTED_LOCATIONS: Record<AiEngine, readonly number[]> = {
-  chatgpt: [2275],
+  chatgpt: [2275, 2344, 2831, 2832, 2833, 2862],
   gemini: [],
   google_ai_overview: [],
+  claude: liveUnsupportedLocations("claude"),
+  perplexity: liveUnsupportedLocations("perplexity"),
 };
+
+/** Countries a live engine's web search does not accept. */
+function liveUnsupportedLocations(engine: AiModelApiEngine): number[] {
+  return LOCATION_OPTIONS.filter(
+    (option) =>
+      !supportsWebSearchCountry(
+        engine,
+        getIsoCountryCode(option.code).toUpperCase(),
+      ),
+  ).map((option) => option.code);
+}
 
 /** "In progress" while a collection is unfinished. */
 export function aiObservationStatusLabel(status: AiObservationStatus): string {
