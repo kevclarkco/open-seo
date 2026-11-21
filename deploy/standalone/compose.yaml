@@ -5,6 +5,8 @@ x-app: &app
   # reads nothing else from the checkout, so it can be pasted into Coolify,
   # Portainer or Dokploy on its own.
   image: ${OPENSEO_IMAGE:-ghcr.io/every-app/open-seo-standalone:latest}
+  # Processes can't gain privileges (setuid binaries, file capabilities).
+  security_opt: [no-new-privileges:true]
 x-storage: &storage
   CELLD_BUCKET: openseo
   S3_ENDPOINT: http://storage:9000
@@ -22,6 +24,7 @@ services:
       RUSTFS_ACCESS_KEY: ${STORAGE_ACCESS_KEY}
       RUSTFS_SECRET_KEY: ${STORAGE_SECRET_KEY}
     volumes: [storage:/data]
+    security_opt: [no-new-privileges:true]
     restart: unless-stopped
     healthcheck:
       test: [CMD, curl, -f, http://localhost:9000/health]
@@ -83,6 +86,7 @@ services:
   web:
     image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
     ports: ["127.0.0.1:${PORT:-3001}:80"]
+    security_opt: [no-new-privileges:true]
     # Written by init from deploy/standalone/nginx.conf in the image. nocopy
     # keeps nginx's own default.conf (root-owned) out of the shared volume.
     volumes:
